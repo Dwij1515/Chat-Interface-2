@@ -1,3 +1,5 @@
+import re
+import requests
 import os
 import json
 import uuid
@@ -104,6 +106,34 @@ def update_chat_title(chat_id, title):
         return True
     return False
 
+def should_trigger_weather_tool(user_input: str):
+    """Detects if user is asking for weather in a city"""
+    pattern = r'\bweather\b.*?\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\b|\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\b.*?\bweather\b'
+    match = re.search(pattern, user_input, re.IGNORECASE)
+    if match:
+        city = match.group(1) or match.group(2)
+        return True, city
+    return False, None
+
+def get_weather_for_city(city_name: str):
+    """Calls OpenWeatherMap API to get weather for a city"""
+    api_key = os.getenv("OPENWEATHER_API_KEY")
+    if not api_key:
+        return "Weather API key is missing. Please set OPENWEATHER_API_KEY."
+
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city_name}&appid={api_key}&units=metric"
+    response = requests.get(url)
+
+    if response.status_code == 200:
+        data = response.json()
+        temp = data["main"]["temp"]
+        desc = data["weather"][0]["description"]
+        return f"The current weather in {city_name} is {temp}°C with {desc}."
+    elif response.status_code == 404:
+        return f"Could not find weather data for '{city_name}'."
+    else:
+        return f"Error fetching weather data: {response.status_code}"
+
 @app.route('/')
 def index():
     """Render the main chat interface"""
@@ -114,7 +144,6 @@ def index():
         create_new_chat("New Chat")
 
     return render_template('index.html', models=AVAILABLE_MODELS)
-
 @app.route('/chat', methods=['POST'])
 def chat():
     """Handle chat messages and get AI responses"""
@@ -126,17 +155,48 @@ def chat():
         if not user_message:
             return jsonify({'error': 'Message cannot be empty'}), 400
 
+        initialize_session()
+
+        # Check for weather request before calling LLM
+        triggered, city = should_trigger_weather_tool(user_message)
+        if triggered and city:
+            current_chat = get_current_chat()
+            if not current_chat:
+                current_chat = create_new_chat()
+
+            user_msg = {
+                'role': 'user',
+                'content': user_message,
+                'timestamp': datetime.now().isoformat()
+            }
+
+            weather_response = get_weather_for_city(city)
+            ai_msg = {
+                'role': 'assistant',
+                'content': weather_response,
+                'timestamp': datetime.now().isoformat(),
+                'model': "weather-api"
+            }
+
+            current_chat['messages'].append(user_msg)
+            current_chat['messages'].append(ai_msg)
+            current_chat['updated_at'] = datetime.now().isoformat()
+            session.modified = True
+
+            return jsonify({
+                'response': weather_response,
+                'model_used': "weather-api",
+                'chat_id': current_chat['id']
+            })
+
+        # Fallback: use Groq if not a weather request
         if not groq_client:
             return jsonify({'error': 'Groq API client not initialized. Please check your API key.'}), 500
 
-        initialize_session()
-
-        # Get or create current chat
         current_chat = get_current_chat()
         if not current_chat:
             current_chat = create_new_chat()
 
-        # Add user message to current chat
         user_msg = {
             'role': 'user',
             'content': user_message,
@@ -144,7 +204,7 @@ def chat():
         }
         current_chat['messages'].append(user_msg)
 
-        # Prepare messages for Groq API (include conversation history)
+        # Prepare messages for Groq API
         user_profile = session.get('user_profile', {})
         user_name = user_profile.get('name', '')
 
@@ -153,8 +213,6 @@ def chat():
             system_message += f" The user's name is {user_name}. Remember this information throughout the conversation."
 
         messages = [{"role": "system", "content": system_message}]
-
-        # Add conversation history (limit to last 20 messages to manage context length)
         recent_messages = current_chat['messages'][-20:]
         for msg in recent_messages:
             messages.append({
@@ -162,11 +220,7 @@ def chat():
                 "content": msg['content']
             })
 
-        # Get response from Groq
-        logger.info(f"Sending request to Groq with model: {selected_model}")
-        logger.info(f"API Key present: {bool(os.getenv('GROQ_API_KEY'))}")
-        logger.info(f"API Key length: {len(os.getenv('GROQ_API_KEY', ''))}")
-
+        # Call Groq API
         chat_completion = groq_client.chat.completions.create(
             messages=messages,
             model=selected_model,
@@ -178,7 +232,6 @@ def chat():
 
         ai_response = chat_completion.choices[0].message.content
 
-        # Add AI response to current chat
         ai_msg = {
             'role': 'assistant',
             'content': ai_response,
@@ -188,17 +241,13 @@ def chat():
         current_chat['messages'].append(ai_msg)
         current_chat['updated_at'] = datetime.now().isoformat()
 
-        # Auto-generate chat title if this is the first exchange
         if len(current_chat['messages']) == 2 and current_chat['title'].startswith('New Chat'):
-            # Generate title from first user message (first 30 chars)
             first_msg = current_chat['messages'][0]['content']
             new_title = first_msg[:30] + "..." if len(first_msg) > 30 else first_msg
             current_chat['title'] = new_title
 
-        # Save session
         session.modified = True
 
-        logger.info("Successfully generated AI response")
         return jsonify({
             'response': ai_response,
             'model_used': selected_model,
@@ -209,7 +258,6 @@ def chat():
         logger.error(f"Error in chat endpoint: {e}")
         logger.error(f"Error type: {type(e).__name__}")
 
-        # Handle specific Groq API errors
         if hasattr(e, 'status_code'):
             if e.status_code == 401:
                 return jsonify({'error': 'Invalid API key. Please check your Groq API key in the .env file.'}), 500
