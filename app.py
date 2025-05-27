@@ -1,13 +1,17 @@
-import re
 import requests
 import os
-import json
 import uuid
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, session
 from groq import Groq
 from dotenv import load_dotenv
 import logging
+
+# LangChain imports
+from langchain_groq import ChatGroq
+from langchain_core.tools import tool
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.prompts import ChatPromptTemplate
 
 # Load environment variables
 load_dotenv()
@@ -26,6 +30,18 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize Groq client: {e}")
     groq_client = None
+
+# Initialize LangChain Groq client
+try:
+    langchain_llm = ChatGroq(
+        api_key=os.getenv('GROQ_API_KEY'),
+        model_name="llama3-8b-8192",
+        temperature=0.7
+    )
+    logger.info("LangChain Groq client initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize LangChain Groq client: {e}")
+    langchain_llm = None
 
 # Available models (you can expand this list)
 AVAILABLE_MODELS = [
@@ -106,33 +122,78 @@ def update_chat_title(chat_id, title):
         return True
     return False
 
-def should_trigger_weather_tool(user_input: str):
-    """Detects if user is asking for weather in a city"""
-    pattern = r'\bweather\b.*?\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\b|\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\b.*?\bweather\b'
-    match = re.search(pattern, user_input, re.IGNORECASE)
-    if match:
-        city = match.group(1) or match.group(2)
-        return True, city
-    return False, None
+# LangChain Weather Tool
+@tool
+def get_weather_for_city(city_name: str) -> str:
+    """Get current weather information for a specific city.
 
-def get_weather_for_city(city_name: str):
-    """Calls OpenWeatherMap API to get weather for a city"""
+    Args:
+        city_name: The name of the city to get weather for
+
+    Returns:
+        A string containing the current weather information
+    """
     api_key = os.getenv("OPENWEATHER_API_KEY")
     if not api_key:
         return "Weather API key is missing. Please set OPENWEATHER_API_KEY."
 
     url = f"http://api.openweathermap.org/data/2.5/weather?q={city_name}&appid={api_key}&units=metric"
-    response = requests.get(url)
 
-    if response.status_code == 200:
-        data = response.json()
-        temp = data["main"]["temp"]
-        desc = data["weather"][0]["description"]
-        return f"The current weather in {city_name} is {temp}°C with {desc}."
-    elif response.status_code == 404:
-        return f"Could not find weather data for '{city_name}'."
-    else:
-        return f"Error fetching weather data: {response.status_code}"
+    try:
+        response = requests.get(url, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            temp = data["main"]["temp"]
+            desc = data["weather"][0]["description"]
+            humidity = data["main"]["humidity"]
+            feels_like = data["main"]["feels_like"]
+            return f"The current weather in {city_name} is {temp}°C with {desc}. It feels like {feels_like}°C and humidity is {humidity}%."
+        elif response.status_code == 404:
+            return f"Could not find weather data for '{city_name}'. Please check the city name."
+        else:
+            return f"Error fetching weather data: HTTP {response.status_code}"
+    except requests.exceptions.RequestException as e:
+        return f"Error connecting to weather service: {str(e)}"
+
+# Initialize LangChain tools and agent
+def initialize_langchain_agent(model_name: str = "llama3-8b-8192"):
+    """Initialize LangChain agent with weather tool"""
+    try:
+        # Update the LLM model if different from default
+        if langchain_llm.model_name != model_name:
+            updated_llm = ChatGroq(
+                api_key=os.getenv('GROQ_API_KEY'),
+                model_name=model_name,
+                temperature=0.7
+            )
+        else:
+            updated_llm = langchain_llm
+
+        # Define the tools available to the agent
+        tools = [get_weather_for_city]
+
+        # Create the prompt template
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a helpful AI assistant with access to weather information.
+            You can get current weather data for any city when users ask about weather.
+
+            When users ask about weather in a specific city, use the get_weather_for_city tool.
+            For general conversations, respond normally without using tools.
+
+            Be conversational and helpful. If a user's name is provided, remember it throughout the conversation."""),
+            ("human", "{input}"),
+            ("placeholder", "{agent_scratchpad}"),
+        ])
+
+        # Create the agent
+        agent = create_tool_calling_agent(updated_llm, tools, prompt)
+        agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False)
+
+        return agent_executor
+    except Exception as e:
+        logger.error(f"Failed to initialize LangChain agent: {e}")
+        return None
 
 @app.route('/')
 def index():
@@ -146,7 +207,7 @@ def index():
     return render_template('index.html', models=AVAILABLE_MODELS)
 @app.route('/chat', methods=['POST'])
 def chat():
-    """Handle chat messages and get AI responses"""
+    """Handle chat messages and get AI responses using LangChain"""
     try:
         data = request.get_json()
         user_message = data.get('message', '').strip()
@@ -157,52 +218,113 @@ def chat():
 
         initialize_session()
 
-        # Check for weather request before calling LLM
-        triggered, city = should_trigger_weather_tool(user_message)
-        if triggered and city:
-            current_chat = get_current_chat()
-            if not current_chat:
-                current_chat = create_new_chat()
-
-            user_msg = {
-                'role': 'user',
-                'content': user_message,
-                'timestamp': datetime.now().isoformat()
-            }
-
-            weather_response = get_weather_for_city(city)
-            ai_msg = {
-                'role': 'assistant',
-                'content': weather_response,
-                'timestamp': datetime.now().isoformat(),
-                'model': "weather-api"
-            }
-
-            current_chat['messages'].append(user_msg)
-            current_chat['messages'].append(ai_msg)
-            current_chat['updated_at'] = datetime.now().isoformat()
-            session.modified = True
-
-            return jsonify({
-                'response': weather_response,
-                'model_used': "weather-api",
-                'chat_id': current_chat['id']
-            })
-
-        # Fallback: use Groq if not a weather request
-        if not groq_client:
-            return jsonify({'error': 'Groq API client not initialized. Please check your API key.'}), 500
-
+        # Get or create current chat
         current_chat = get_current_chat()
         if not current_chat:
             current_chat = create_new_chat()
 
+        # Add user message to chat history
         user_msg = {
             'role': 'user',
             'content': user_message,
             'timestamp': datetime.now().isoformat()
         }
         current_chat['messages'].append(user_msg)
+
+        # Initialize LangChain agent with selected model
+        agent_executor = initialize_langchain_agent(selected_model)
+
+        if not agent_executor:
+            # Fallback to direct Groq API if LangChain fails
+            return fallback_to_groq_api(user_message, selected_model, current_chat)
+
+        # Prepare conversation context for LangChain
+        user_profile = session.get('user_profile', {})
+        user_name = user_profile.get('name', '')
+
+        # Build context from recent conversation history
+        context_messages = []
+        recent_messages = current_chat['messages'][-10:]  # Last 10 messages for context
+        for msg in recent_messages[:-1]:  # Exclude the current message we just added
+            if msg['role'] == 'user':
+                context_messages.append(f"User: {msg['content']}")
+            else:
+                context_messages.append(f"Assistant: {msg['content']}")
+
+        # Create input with context
+        context_str = "\n".join(context_messages) if context_messages else ""
+        user_input = user_message
+        if user_name:
+            user_input = f"[User's name is {user_name}] {user_message}"
+        if context_str:
+            user_input = f"Previous conversation:\n{context_str}\n\nCurrent message: {user_input}"
+
+        # Get response from LangChain agent
+        logger.info(f"Sending request to LangChain agent with model: {selected_model}")
+        response = agent_executor.invoke({"input": user_input})
+        ai_response = response.get("output", "I apologize, but I couldn't generate a response.")
+
+        # Determine if weather tool was used
+        model_used = selected_model
+        if "weather" in user_message.lower() and any(keyword in ai_response.lower() for keyword in ["temperature", "°c", "humidity", "feels like"]):
+            model_used = f"{selected_model} + weather-api"
+
+        # Add AI response to chat history
+        ai_msg = {
+            'role': 'assistant',
+            'content': ai_response,
+            'timestamp': datetime.now().isoformat(),
+            'model': model_used
+        }
+        current_chat['messages'].append(ai_msg)
+        current_chat['updated_at'] = datetime.now().isoformat()
+
+        # Auto-generate chat title if this is the first exchange
+        if len(current_chat['messages']) == 2 and current_chat['title'].startswith('New Chat'):
+            first_msg = current_chat['messages'][0]['content']
+            new_title = first_msg[:30] + "..." if len(first_msg) > 30 else first_msg
+            current_chat['title'] = new_title
+
+        session.modified = True
+
+        logger.info("Successfully generated AI response using LangChain")
+        return jsonify({
+            'response': ai_response,
+            'model_used': model_used,
+            'chat_id': current_chat['id']
+        })
+
+    except Exception as e:
+        logger.error(f"Error in chat endpoint: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+        # Try fallback to direct Groq API
+        try:
+            current_chat = get_current_chat()
+            if current_chat:
+                return fallback_to_groq_api(user_message, selected_model, current_chat)
+        except:
+            pass
+
+        if hasattr(e, 'status_code'):
+            if e.status_code == 401:
+                return jsonify({'error': 'Invalid API key. Please check your Groq API key in the .env file.'}), 500
+            elif e.status_code == 429:
+                return jsonify({'error': 'Rate limit exceeded. Please try again in a moment.'}), 500
+            else:
+                return jsonify({'error': f'API Error (Status {e.status_code}): {str(e)}'}), 500
+        else:
+            return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+
+def fallback_to_groq_api(user_message: str, selected_model: str, current_chat: dict):
+    """Fallback function to use direct Groq API when LangChain fails"""
+    try:
+        if not groq_client:
+            return jsonify({'error': 'Both LangChain and Groq API clients are unavailable.'}), 500
+
+        logger.info("Using fallback Groq API")
 
         # Prepare messages for Groq API
         user_profile = session.get('user_profile', {})
@@ -236,37 +358,22 @@ def chat():
             'role': 'assistant',
             'content': ai_response,
             'timestamp': datetime.now().isoformat(),
-            'model': selected_model
+            'model': f"{selected_model} (fallback)"
         }
         current_chat['messages'].append(ai_msg)
         current_chat['updated_at'] = datetime.now().isoformat()
-
-        if len(current_chat['messages']) == 2 and current_chat['title'].startswith('New Chat'):
-            first_msg = current_chat['messages'][0]['content']
-            new_title = first_msg[:30] + "..." if len(first_msg) > 30 else first_msg
-            current_chat['title'] = new_title
 
         session.modified = True
 
         return jsonify({
             'response': ai_response,
-            'model_used': selected_model,
+            'model_used': f"{selected_model} (fallback)",
             'chat_id': current_chat['id']
         })
 
-    except Exception as e:
-        logger.error(f"Error in chat endpoint: {e}")
-        logger.error(f"Error type: {type(e).__name__}")
-
-        if hasattr(e, 'status_code'):
-            if e.status_code == 401:
-                return jsonify({'error': 'Invalid API key. Please check your Groq API key in the .env file.'}), 500
-            elif e.status_code == 429:
-                return jsonify({'error': 'Rate limit exceeded. Please try again in a moment.'}), 500
-            else:
-                return jsonify({'error': f'API Error (Status {e.status_code}): {str(e)}'}), 500
-        else:
-            return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+    except Exception as fallback_error:
+        logger.error(f"Fallback Groq API also failed: {fallback_error}")
+        return jsonify({'error': 'Both LangChain and fallback API failed. Please try again.'}), 500
 
 @app.route('/chats/new', methods=['POST'])
 def new_chat():
