@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Chat Interface - Groq</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Sidebar -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h3><i class="fas fa-comments"></i> Chat Sessions</h3>
+            <button id="closeSidebar" class="close-sidebar-btn">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+
+        <div class="sidebar-actions">
+            <button id="newChatBtn" class="new-chat-btn">
+                <i class="fas fa-plus"></i> New Chat
+            </button>
+            <div class="search-container">
+                <input type="text" id="searchChats" placeholder="Search chats..." class="search-input">
+                <i class="fas fa-search search-icon"></i>
+            </div>
+        </div>
+
+        <div class="chat-list" id="chatList">
+            <!-- Chat sessions will be loaded here -->
+        </div>
+
+        <div class="sidebar-footer">
+            <div class="user-profile">
+                <div class="profile-info">
+                    <i class="fas fa-user"></i>
+                    <span id="userName">Guest User</span>
+                </div>
+                <button id="editProfileBtn" class="edit-profile-btn" title="Edit Profile">
+                    <i class="fas fa-edit"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Chat Container -->
+    <div class="chat-container" id="chatContainer">
+        <!-- Header -->
+        <div class="chat-header">
+            <div class="header-content">
+                <div class="header-left">
+                    <button id="toggleSidebar" class="sidebar-toggle-btn">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <h1><i class="fas fa-robot"></i> AI Chat Interface</h1>
+                </div>
+                <div class="header-controls">
+                    <select id="modelSelect" class="model-select">
+                        {% for model in models %}
+                        <option value="{{ model }}" {% if loop.first %}selected{% endif %}>{{ model }}</option>
+                        {% endfor %}
+                    </select>
+                    <button id="newChatHeaderBtn" class="new-chat-header-btn" title="New Chat">
+                        <i class="fas fa-plus"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Messages Area -->
+        <div class="chat-messages" id="chatMessages">
+            <div class="welcome-message">
+                <div class="welcome-content">
+                    <i class="fas fa-comments"></i>
+                    <h2>Welcome to AI Chat!</h2>
+                    <p>Start a conversation with our AI assistant powered by Groq. Ask questions, get help, or just chat!</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Typing Indicator -->
+        <div class="typing-indicator" id="typingIndicator" style="display: none;">
+            <div class="typing-dots">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+            <span class="typing-text">AI is typing...</span>
+        </div>
+
+        <!-- Input Area -->
+        <div class="chat-input-container">
+            <div class="input-wrapper">
+                <textarea
+                    id="messageInput"
+                    placeholder="Type your message here... (Press Enter to send, Shift+Enter for new line)"
+                    rows="1"
+                    maxlength="2000"
+                ></textarea>
+                <button id="sendBtn" class="send-btn" disabled>
+                    <i class="fas fa-paper-plane"></i>
+                </button>
+            </div>
+            <div class="input-info">
+                <span class="char-count">0/2000</span>
+                <span class="model-info">Using: <span id="currentModel">{{ models[0] }}</span></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Error Modal -->
+    <div id="errorModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-exclamation-triangle"></i> Error</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="errorMessage"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="closeErrorModal()">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Profile Modal -->
+    <div id="profileModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-user"></i> User Profile</h3>
+                <button class="modal-close" onclick="closeProfileModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="profileName">Your Name:</label>
+                    <input type="text" id="profileName" class="form-input" placeholder="Enter your name">
+                    <small class="form-help">This helps the AI remember you across conversations</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeProfileModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveProfile()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chat Rename Modal -->
+    <div id="renameModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-edit"></i> Rename Chat</h3>
+                <button class="modal-close" onclick="closeRenameModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="chatTitle">Chat Title:</label>
+                    <input type="text" id="chatTitle" class="form-input" placeholder="Enter chat title">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeRenameModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveRename()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sidebar Overlay for Mobile -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
