@@ -1,5 +1,8 @@
 # Environment variables
 .env
+token.json
+mock_sheets_database.json
+attachments/
 
 # Python
 __pycache__/
