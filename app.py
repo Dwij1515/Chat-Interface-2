@@ -80,21 +80,30 @@ with app.app_context():
         logger.error(f"Failed to initialize SQLite tables: {db_err}")
 
 # Initialize Groq client
+groq_key = os.getenv('GROQ_API_KEY')
 try:
-    groq_client = Groq(api_key=os.getenv('GROQ_API_KEY'))
-    logger.info("Groq client initialized successfully")
+    if groq_key:
+        groq_client = Groq(api_key=groq_key)
+        logger.info("Groq client initialized successfully")
+    else:
+        groq_client = None
+        logger.warning("GROQ_API_KEY not set in environment")
 except Exception as e:
     logger.error(f"Failed to initialize Groq client: {e}")
     groq_client = None
 
 # Initialize LangChain Groq client
 try:
-    langchain_llm = ChatGroq(
-        api_key=os.getenv('GROQ_API_KEY'),
-        model_name="llama-3.1-8b-instant",
-        temperature=0.7
-    )
-    logger.info("LangChain Groq client initialized successfully")
+    if groq_key:
+        langchain_llm = ChatGroq(
+            api_key=groq_key,
+            model_name="llama-3.1-8b-instant",
+            temperature=0.7
+        )
+        logger.info("LangChain Groq client initialized successfully")
+    else:
+        langchain_llm = None
+        logger.warning("GROQ_API_KEY not set for LangChain Groq")
 except Exception as e:
     logger.error(f"Failed to initialize LangChain Groq client: {e}")
     langchain_llm = None
@@ -113,7 +122,8 @@ db = None
 chats_col = None
 profiles_col = None
 
-if MONGO_URI:
+is_cloud = bool(os.getenv("RENDER") or os.getenv("PORT"))
+if MONGO_URI and not (is_cloud and ("localhost" in MONGO_URI or "127.0.0.1" in MONGO_URI)):
     try:
         from pymongo import MongoClient
         # Configure MongoClient with a short 2-second timeout to check connection immediately
@@ -129,12 +139,12 @@ if MONGO_URI:
         profiles_col = db['profiles']
         logger.info(f"Connected to MongoDB successfully: DB Name = '{db.name}'")
     except Exception as e:
-        logger.error(f"Failed to connect to MongoDB (MongoDB might not be running), falling back to SQLite: {e}")
+        logger.error(f"Failed to connect to MongoDB, falling back to SQLite: {e}")
         db = None
         chats_col = None
         profiles_col = None
 else:
-    logger.info("No MONGO_URI specified, using SQLite database persistence")
+    logger.info("Using SQLite database persistence for chat history")
 
 
 # MongoDB helper functions with SQLite fallbacks
