@@ -1061,3 +1061,289 @@ body {
         font-size: 0.8rem;
     }
 }
+
+/* ==========================================================================
+   Markdown and Code Formatting
+   ========================================================================== */
+
+/* Markdown Content Spacing */
+.message-content p {
+    margin-bottom: 0.75rem;
+    line-height: 1.6;
+}
+.message-content p:last-child {
+    margin-bottom: 0;
+}
+
+.message-content h1, 
+.message-content h2, 
+.message-content h3, 
+.message-content h4 {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    font-family: var(--font-heading);
+    font-weight: 600;
+}
+
+.message-content h1 { font-size: 1.35rem; }
+.message-content h2 { font-size: 1.2rem; }
+.message-content h3 { font-size: 1.1rem; }
+.message-content h4 { font-size: 1.0rem; }
+
+.message-content ul, 
+.message-content ol {
+    margin-left: 1.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.message-content li {
+    margin-bottom: 0.25rem;
+}
+
+.message-content blockquote {
+    border-left: 3px solid #6366f1;
+    padding-left: 0.75rem;
+    color: var(--text-secondary);
+    font-style: italic;
+    margin: 0.75rem 0;
+}
+
+.message-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+}
+
+.message-content th, 
+.message-content td {
+    border: 1px solid var(--glass-border);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+}
+
+.message-content th {
+    background: rgba(255, 255, 255, 0.05);
+    font-weight: 600;
+}
+
+.message-content tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+/* Inline Code */
+.message-content code:not(pre code) {
+    background: rgba(255, 255, 255, 0.08);
+    color: #f43f5e;
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    font-family: 'Consolas', 'Courier New', Courier, monospace;
+    font-size: 0.85em;
+    font-weight: 500;
+}
+
+/* Code Blocks */
+.code-block-wrapper {
+    position: relative;
+    margin: 1rem 0;
+    border-radius: var(--border-radius-md);
+    overflow: hidden;
+    border: 1px solid var(--glass-border-hover);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.code-block-header {
+    background: #0f172a;
+    padding: 0.5rem 1rem;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-family: var(--font-heading);
+    font-weight: 500;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.code-block-wrapper pre {
+    margin: 0 !important;
+    border-radius: 0 !important;
+    background: #090d16 !important;
+    padding: 1rem;
+    overflow-x: auto;
+}
+
+.code-block-wrapper code {
+    font-family: 'Consolas', 'Courier New', Courier, monospace;
+    font-size: 0.88rem;
+    background: transparent !important;
+    padding: 0 !important;
+}
+
+/* Copy Code Button */
+.copy-code-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--glass-border);
+    color: var(--text-secondary);
+    padding: 0.25rem 0.5rem;
+    font-size: 0.72rem;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: var(--transition-smooth);
+}
+
+.copy-code-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text-primary);
+}
+
+.copy-code-btn.copied {
+    background: rgba(16, 185, 129, 0.15);
+    border-color: rgba(16, 185, 129, 0.4);
+    color: #34d399;
+}
+
+/* ==========================================================================
+   Voice Input and Output Controls
+   ========================================================================== */
+
+/* Microphone Input Button */
+.voice-input-btn {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--glass-border);
+    color: var(--text-secondary);
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.05rem;
+    transition: var(--transition-smooth);
+    margin-right: 0.5rem;
+}
+
+.voice-input-btn:hover {
+    background: rgba(99, 102, 241, 0.1);
+    color: #6366f1;
+    border-color: rgba(99, 102, 241, 0.3);
+}
+
+.voice-input-btn.listening {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.4);
+    animation: pulseMic 1.5s infinite;
+}
+
+@keyframes pulseMic {
+    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+    70% { transform: scale(1.06); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+    100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* Read Aloud Button in Assistant Messages */
+.message-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+}
+
+.message-action-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: var(--transition-smooth);
+    padding: 0.1rem 0.3rem;
+    border-radius: 4px;
+}
+
+.message-action-btn:hover {
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.message-action-btn.speaking {
+    color: #6366f1;
+    animation: speakIndicator 1.2s infinite ease-in-out;
+}
+
+@keyframes speakIndicator {
+    0% { opacity: 0.6; }
+    50% { opacity: 1; }
+    100% { opacity: 0.6; }
+}
+
+/* Adjust Message Container Layout to accommodateactions */
+.message {
+    position: relative;
+}
+
+/* ==========================================================================
+   Chat Export Dropdown
+   ========================================================================== */
+.export-dropdown {
+    position: relative;
+    display: inline-block;
+}
+
+.export-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--glass-border);
+    color: var(--text-secondary);
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: var(--transition-smooth);
+}
+
+.export-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+}
+
+.export-dropdown-content {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 8px);
+    background: #0f172a;
+    border: 1px solid var(--glass-border-hover);
+    min-width: 160px;
+    box-shadow: var(--panel-shadow);
+    border-radius: var(--border-radius-md);
+    z-index: 1000;
+    overflow: hidden;
+    animation: menuFadeIn 0.15s ease-out;
+}
+
+.export-dropdown-content.show {
+    display: block;
+}
+
+.export-dropdown-content a {
+    color: var(--text-secondary);
+    padding: 0.75rem 1rem;
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.85rem;
+    transition: var(--transition-smooth);
+}
+
+.export-dropdown-content a:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-primary);
+}
+

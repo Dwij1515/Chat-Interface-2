@@ -26,6 +26,37 @@ const profileName = document.getElementById('profileName');
 const renameModal = document.getElementById('renameModal');
 const chatTitle = document.getElementById('chatTitle');
 
+// Voice & Export features elements
+const exportBtn = document.getElementById('exportBtn');
+const exportDropdownContent = document.getElementById('exportDropdownContent');
+const exportMarkdown = document.getElementById('exportMarkdown');
+const exportJSON = document.getElementById('exportJSON');
+const voiceInputBtn = document.getElementById('voiceInputBtn');
+
+// Speech API setup
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let isListening = false;
+let currentUtterance = null;
+let speakingButton = null;
+
+if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+}
+
+// Configure Marked.js rendering if available
+if (typeof marked !== 'undefined') {
+    marked.setOptions({
+        gfm: true,
+        breaks: true
+    });
+}
+
+
 // State
 let isWaitingForResponse = false;
 let conversationStarted = false;
@@ -100,6 +131,74 @@ function setupEventListeners() {
             closeRenameModal();
         }
     });
+
+    // Export Dropdown events
+    if (exportBtn && exportDropdownContent) {
+        exportBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            exportDropdownContent.classList.toggle('show');
+        });
+
+        document.addEventListener('click', function() {
+            exportDropdownContent.classList.remove('show');
+        });
+    }
+
+    if (exportMarkdown) {
+        exportMarkdown.addEventListener('click', function(e) {
+            e.preventDefault();
+            if (currentChatId) {
+                window.location.href = `/chats/${currentChatId}/export?format=markdown`;
+            } else {
+                showError('No active chat session to export.');
+            }
+        });
+    }
+
+    if (exportJSON) {
+        exportJSON.addEventListener('click', function(e) {
+            e.preventDefault();
+            if (currentChatId) {
+                window.location.href = `/chats/${currentChatId}/export?format=json`;
+            } else {
+                showError('No active chat session to export.');
+            }
+        });
+    }
+
+    // Voice Speech-to-Text Input Button
+    if (voiceInputBtn && recognition) {
+        voiceInputBtn.addEventListener('click', toggleVoiceInput);
+        
+        recognition.onstart = () => {
+            isListening = true;
+            voiceInputBtn.classList.add('listening');
+            voiceInputBtn.title = 'Listening... Click to stop';
+            messageInput.placeholder = 'Listening... Speak now...';
+        };
+        
+        recognition.onend = () => {
+            isListening = false;
+            voiceInputBtn.classList.remove('listening');
+            voiceInputBtn.title = 'Voice Input (Speech-to-Text)';
+            messageInput.placeholder = 'Type your message here... (Press Enter to send, Shift+Enter for new line)';
+        };
+        
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            const currentText = messageInput.value.trim();
+            messageInput.value = currentText ? `${currentText} ${transcript}` : transcript;
+            messageInput.dispatchEvent(new Event('input'));
+        };
+        
+        recognition.onerror = (event) => {
+            console.error('Speech recognition error', event.error);
+            isListening = false;
+            voiceInputBtn.classList.remove('listening');
+        };
+    } else if (voiceInputBtn) {
+        voiceInputBtn.style.display = 'none'; // hide microphone if browser doesn't support Web Speech API
+    }
 }
 
 // Update character count
@@ -358,7 +457,52 @@ function addMessage(content, role, modelUsed = null) {
 
     const messageContent = document.createElement('div');
     messageContent.className = 'message-content';
-    messageContent.textContent = content;
+    
+    // Parse Markdown if marked is available, fallback to textContent
+    if (typeof marked !== 'undefined') {
+        messageContent.innerHTML = marked.parse(content);
+        
+        // Post-process pre > code blocks for ChatGPT style formatting
+        const preElements = messageContent.querySelectorAll('pre');
+        preElements.forEach(pre => {
+            const code = pre.querySelector('code');
+            if (code) {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'code-block-wrapper';
+                
+                // Extract language class
+                let lang = 'code';
+                const classes = code.className.split(' ');
+                for (const cls of classes) {
+                    if (cls.startsWith('language-')) {
+                        lang = cls.replace('language-', '');
+                        break;
+                    }
+                }
+                
+                const header = document.createElement('div');
+                header.className = 'code-block-header';
+                header.innerHTML = `
+                    <span>${lang.toUpperCase()}</span>
+                    <button class="copy-code-btn" onclick="copyCodeBlock(this)">
+                        <i class="far fa-copy"></i> Copy
+                    </button>
+                `;
+                
+                // Replace pre in the DOM
+                pre.parentNode.insertBefore(wrapper, pre);
+                wrapper.appendChild(header);
+                wrapper.appendChild(pre);
+                
+                // Trigger Highlight.js if available
+                if (typeof hljs !== 'undefined') {
+                    hljs.highlightElement(code);
+                }
+            }
+        });
+    } else {
+        messageContent.textContent = content;
+    }
 
     const messageInfo = document.createElement('div');
     messageInfo.className = 'message-info';
@@ -373,11 +517,113 @@ function addMessage(content, role, modelUsed = null) {
 
     messageDiv.appendChild(messageContent);
     messageDiv.appendChild(messageInfo);
+
+    // Add speaker action button for text-to-speech if role is assistant
+    if (role === 'assistant') {
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'message-actions';
+        
+        const speakBtn = document.createElement('button');
+        speakBtn.className = 'message-action-btn';
+        speakBtn.title = 'Read Aloud';
+        speakBtn.innerHTML = '<i class="fas fa-volume-up"></i>';
+        
+        speakBtn.addEventListener('click', () => {
+            toggleReadAloud(content, speakBtn);
+        });
+        
+        actionsDiv.appendChild(speakBtn);
+        messageDiv.appendChild(actionsDiv);
+    }
+
     chatMessages.appendChild(messageDiv);
 
     // Scroll to bottom
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
+
+// Copy code block contents to clipboard
+window.copyCodeBlock = function(button) {
+    const wrapper = button.closest('.code-block-wrapper');
+    if (!wrapper) return;
+    const code = wrapper.querySelector('code');
+    if (!code) return;
+    const text = code.innerText;
+    
+    navigator.clipboard.writeText(text).then(() => {
+        button.innerHTML = '<i class="fas fa-check"></i> Copied!';
+        button.classList.add('copied');
+        setTimeout(() => {
+            button.innerHTML = '<i class="far fa-copy"></i> Copy';
+            button.classList.remove('copied');
+        }, 2000);
+    }).catch(err => {
+        console.error('Failed to copy code: ', err);
+    });
+};
+
+// Toggle Voice input Speech-to-Text
+function toggleVoiceInput() {
+    if (!recognition) return;
+    if (isListening) {
+        recognition.stop();
+    } else {
+        try {
+            recognition.start();
+        } catch (e) {
+            console.error('Failed to start speech recognition: ', e);
+        }
+    }
+}
+
+// Text-to-speech toggling narration
+function toggleReadAloud(text, button) {
+    if (!window.speechSynthesis) {
+        showError('Text-to-Speech is not supported in this browser.');
+        return;
+    }
+
+    // Stop speaking if currently speaking
+    if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+        if (speakingButton) {
+            speakingButton.innerHTML = '<i class="fas fa-volume-up"></i>';
+            speakingButton.classList.remove('speaking');
+            speakingButton.title = 'Read Aloud';
+        }
+        if (speakingButton === button) {
+            speakingButton = null;
+            return;
+        }
+    }
+
+    // Strip HTML/Markdown elements from speech output
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = typeof marked !== 'undefined' ? marked.parse(text) : text;
+    const plainText = tempDiv.textContent || tempDiv.innerText || '';
+
+    currentUtterance = new SpeechSynthesisUtterance(plainText);
+    speakingButton = button;
+    
+    currentUtterance.onend = () => {
+        button.innerHTML = '<i class="fas fa-volume-up"></i>';
+        button.classList.remove('speaking');
+        button.title = 'Read Aloud';
+        speakingButton = null;
+    };
+    
+    currentUtterance.onerror = () => {
+        button.innerHTML = '<i class="fas fa-volume-up"></i>';
+        button.classList.remove('speaking');
+        speakingButton = null;
+    };
+
+    button.innerHTML = '<i class="fas fa-stop"></i> Stop';
+    button.classList.add('speaking');
+    button.title = 'Stop Reading';
+    window.speechSynthesis.speak(currentUtterance);
+}
+
 
 // Show typing indicator
 function showTypingIndicator() {
@@ -637,6 +883,107 @@ function closeProfileModal() {
 function closeRenameModal() {
     renameModal.style.display = 'none';
 }
+
+// Gmail Modal Functions
+window.openGmailModal = async function() {
+    const modal = document.getElementById('gmailModal');
+    const alertDiv = document.getElementById('gmailStatusAlert');
+    if (modal) modal.style.display = 'flex';
+    
+    if (alertDiv) {
+        alertDiv.style.display = 'block';
+        alertDiv.style.backgroundColor = 'rgba(99, 102, 241, 0.15)';
+        alertDiv.style.color = '#a5b4fc';
+        alertDiv.style.border = '1px solid rgba(99, 102, 241, 0.3)';
+        alertDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking Gmail status...';
+    }
+    
+    try {
+        const res = await fetch('/gmail/status');
+        const data = await res.json();
+        if (data.user) {
+            document.getElementById('gmailUser').value = data.user;
+        }
+        if (data.success) {
+            alertDiv.style.backgroundColor = 'rgba(16, 185, 129, 0.15)';
+            alertDiv.style.color = '#6ee7b7';
+            alertDiv.style.border = '1px solid rgba(16, 185, 129, 0.3)';
+            alertDiv.innerHTML = `<i class="fas fa-check-circle"></i> ${data.message}`;
+        } else {
+            alertDiv.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+            alertDiv.style.color = '#fca5a5';
+            alertDiv.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+            alertDiv.innerHTML = `<i class="fas fa-exclamation-circle"></i> ${data.error || 'Gmail disconnected or missing credentials.'}`;
+        }
+    } catch (err) {
+        if (alertDiv) {
+            alertDiv.style.display = 'none';
+        }
+    }
+};
+
+window.closeGmailModal = function() {
+    const modal = document.getElementById('gmailModal');
+    if (modal) modal.style.display = 'none';
+};
+
+window.saveAndTestGmail = async function() {
+    const user = document.getElementById('gmailUser').value.trim();
+    const pwd = document.getElementById('gmailAppPassword').value.trim();
+    const alertDiv = document.getElementById('gmailStatusAlert');
+    const saveBtn = document.getElementById('saveGmailBtn');
+
+    if (!user || !pwd) {
+        if (alertDiv) {
+            alertDiv.style.display = 'block';
+            alertDiv.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+            alertDiv.style.color = '#fca5a5';
+            alertDiv.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+            alertDiv.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Please enter both your Gmail address and 16-character App Password.';
+        }
+        return;
+    }
+
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
+    alertDiv.style.display = 'block';
+    alertDiv.style.backgroundColor = 'rgba(99, 102, 241, 0.15)';
+    alertDiv.style.color = '#a5b4fc';
+    alertDiv.style.border = '1px solid rgba(99, 102, 241, 0.3)';
+    alertDiv.innerHTML = '<i class="fas fa-sync fa-spin"></i> Saving credentials and testing Gmail IMAP connection...';
+
+    try {
+        const response = await fetch('/gmail/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gmail_user: user, gmail_app_password: pwd })
+        });
+        const data = await response.json();
+        
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = 'Test & Save Connection';
+
+        if (data.success) {
+            alertDiv.style.backgroundColor = 'rgba(16, 185, 129, 0.15)';
+            alertDiv.style.color = '#6ee7b7';
+            alertDiv.style.border = '1px solid rgba(16, 185, 129, 0.3)';
+            alertDiv.innerHTML = `<i class="fas fa-check-circle"></i> ${data.message}`;
+            document.getElementById('gmailAppPassword').value = '';
+        } else {
+            alertDiv.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+            alertDiv.style.color = '#fca5a5';
+            alertDiv.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+            alertDiv.innerHTML = `<i class="fas fa-exclamation-circle"></i> ${data.error}`;
+        }
+    } catch (error) {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = 'Test & Save Connection';
+        alertDiv.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+        alertDiv.style.color = '#fca5a5';
+        alertDiv.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+        alertDiv.innerHTML = `<i class="fas fa-exclamation-circle"></i> Server request failed: ${error.message}`;
+    }
+};
 
 // Close modal with close button
 document.querySelector('.modal-close').addEventListener('click', closeErrorModal);

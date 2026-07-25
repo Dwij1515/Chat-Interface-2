@@ -9,6 +9,10 @@
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <!-- Marked and Highlight.js for ChatGPT-style Markdown & Code formatting -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
 <body>
     <!-- Sidebar -->
@@ -67,6 +71,19 @@
                     <button id="newChatHeaderBtn" class="new-chat-header-btn" title="New Chat">
                         <i class="fas fa-plus"></i>
                     </button>
+                    <button id="gmailSettingsBtn" class="export-btn" title="Gmail Settings" onclick="openGmailModal()">
+                        <i class="fas fa-envelope"></i>
+                    </button>
+                    <!-- Export Chat Dropdown -->
+                    <div class="export-dropdown">
+                        <button id="exportBtn" class="export-btn" title="Export Chat">
+                            <i class="fas fa-download"></i>
+                        </button>
+                        <div class="export-dropdown-content" id="exportDropdownContent">
+                            <a href="#" id="exportMarkdown"><i class="fab fa-markdown"></i> Export Markdown</a>
+                            <a href="#" id="exportJSON"><i class="fas fa-code"></i> Export JSON</a>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -101,6 +118,9 @@
                     rows="1"
                     maxlength="2000"
                 ></textarea>
+                <button id="voiceInputBtn" class="voice-input-btn" title="Voice Input (Speech-to-Text)">
+                    <i class="fas fa-microphone"></i>
+                </button>
                 <button id="sendBtn" class="send-btn" disabled>
                     <i class="fas fa-paper-plane"></i>
                 </button>
@@ -145,6 +165,35 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeProfileModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="saveProfile()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Gmail Settings Modal -->
+    <div id="gmailModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-envelope"></i> Gmail Configuration</h3>
+                <button class="modal-close" onclick="closeGmailModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="gmailStatusAlert" class="status-alert" style="margin-bottom: 15px; padding: 12px; border-radius: 8px; font-size: 0.9em; display: none;"></div>
+                <div class="form-group">
+                    <label for="gmailUser">Gmail Address:</label>
+                    <input type="email" id="gmailUser" class="form-input" placeholder="e.g. ranadwijrajsinh@gmail.com">
+                </div>
+                <div class="form-group" style="margin-top: 12px;">
+                    <label for="gmailAppPassword">Google App Password (16 chars):</label>
+                    <input type="password" id="gmailAppPassword" class="form-input" placeholder="Enter 16-character App Password">
+                    <small class="form-help" style="display: block; margin-top: 6px; line-height: 1.4; color: #a0aec0;">
+                        Google requires a 16-character App Password when 2-Step Verification is ON.<br>
+                        Generate one at: <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color: #818cf8; text-decoration: underline;">myaccount.google.com/apppasswords</a>
+                    </small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeGmailModal()">Close</button>
+                <button class="btn btn-primary" id="saveGmailBtn" onclick="saveAndTestGmail()">Test & Save Connection</button>
             </div>
         </div>
     </div>

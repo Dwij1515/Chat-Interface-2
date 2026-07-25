@@ -8,6 +8,7 @@ import imaplib
 import email
 from email.header import decode_header
 from datetime import datetime
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,6 @@ class ComposiaSDK:
         self.weather_api_key = weather_api_key or os.getenv("OPENWEATHER_API_KEY")
         self.gmail_credentials_path = gmail_credentials_path or os.getenv("GOOGLE_CLIENT_SECRET_FILE")
         self.google_credentials_path = google_credentials_path or os.getenv("GOOGLE_CLIENT_SECRET_FILE")
-        self.gmail_user = os.getenv("GMAIL_USER")
-        self.gmail_app_password = os.getenv("GMAIL_APP_PASSWORD")
         
         # Determine paths
         self.attachments_dir = "attachments"
@@ -76,7 +75,6 @@ class ComposiaSDK:
         # API Client Flags
         self.use_real_weather = bool(self.weather_api_key and "your" not in self.weather_api_key and len(self.weather_api_key) > 10)
         self.use_real_google = False
-        self.use_imap = bool(self.gmail_user and self.gmail_app_password)
         
         # Try to initialize real Google Clients if credentials path exists
         if self.google_credentials_path and os.path.exists(self.google_credentials_path):
@@ -117,12 +115,79 @@ class ComposiaSDK:
         else:
             logger.info("Credentials file not found. Operating Google features in Mock mode.")
 
+    @property
+    def gmail_user(self):
+        load_dotenv(override=True)
+        return (os.getenv("GMAIL_USER") or "").strip()
+
+    @property
+    def gmail_app_password(self):
+        load_dotenv(override=True)
+        return (os.getenv("GMAIL_APP_PASSWORD") or "").strip()
+
+    @property
+    def use_imap(self):
+        u = self.gmail_user
+        p = self.gmail_app_password
+        return bool(
+            u and p and
+            not any(kw in str(p).lower() for kw in ["xxxx", "enter pass", "your", "placeholder"]) and
+            "your_" not in str(u).lower()
+        )
+
+    def test_gmail_connection(self):
+        """Test IMAP or Google API connection and return connection status"""
+        if self.use_imap:
+            try:
+                mail = self._connect_imap()
+                mail.select("inbox")
+                status, messages = mail.search(None, "ALL")
+                count = len(messages[0].split()) if messages and messages[0] else 0
+                mail.logout()
+                return {
+                    "success": True,
+                    "mode": "IMAP",
+                    "user": self.gmail_user,
+                    "total_emails": count,
+                    "message": f"Successfully connected to Gmail IMAP as '{self.gmail_user}'. Found {count} emails."
+                }
+            except Exception as e:
+                err = self._format_imap_error(e)
+                return {
+                    "success": False,
+                    "mode": "IMAP",
+                    "user": self.gmail_user,
+                    "error": err["error"]
+                }
+        elif self.use_real_google:
+            return {
+                "success": True,
+                "mode": "Google OAuth API",
+                "message": "Google OAuth API initialized and ready."
+            }
+        else:
+            return {
+                "success": False,
+                "mode": "Mock Mode",
+                "error": "Gmail credentials (GMAIL_USER & GMAIL_APP_PASSWORD) are missing or set to placeholders in .env."
+            }
+
+    def _format_imap_error(self, e):
+        err_msg = str(e)
+        if "Application-specific password required" in err_msg or "AUTHENTICATIONFAILED" in err_msg or "invalid credentials" in err_msg.lower():
+            return {
+                "error": f"Gmail IMAP Authentication Failed for '{self.gmail_user}'. Google requires an 16-character App Password when 2-Step Verification is enabled. Please generate a 16-character App Password at https://myaccount.google.com/apppasswords and update GMAIL_APP_PASSWORD in your .env file."
+            }
+        return {"error": f"Gmail IMAP connection failed for '{self.gmail_user}': {err_msg}"}
+
     def _connect_imap(self):
         """Connect to IMAP server using environment credentials"""
-        if not self.gmail_user or not self.gmail_app_password:
+        user = self.gmail_user
+        password = self.gmail_app_password
+        if not user or not password:
             raise ValueError("Gmail IMAP user or password not configured in .env.")
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(self.gmail_user, self.gmail_app_password)
+        mail.login(user, password)
         return mail
 
     def _parse_imap_message(self, mail, e_id):
@@ -172,43 +237,77 @@ class ComposiaSDK:
                 }
         return None
 
+    def _clean_location(self, location):
+        """Sanitize conversational location strings to extract the core city name"""
+        if not location:
+            return ""
+        loc = location.strip()
+        # Remove common sentence prefixes and filler phrases
+        loc = re.sub(r'^(?:what\s+is|what\'s|show\s+me|tell\s+me|check|get|find|how\s+is|give\s+me)?\s*(?:the\s+)?(?:weather|temperature|forecast)?\s*(?:in|of|for|at|from)?\s*', '', loc, flags=re.IGNORECASE)
+        loc = re.sub(r'^(?:this\s+city|the\s+city\s+of|the\s+city|city\s+of|city|my\s+city|a\s+city|this|that)\s*', '', loc, flags=re.IGNORECASE)
+        loc = re.sub(r'\b(?:right\s+now|today|tomorrow|this\s+week|currently|please)\b', '', loc, flags=re.IGNORECASE).strip()
+        loc = re.sub(r'^(?:in|of|for|at|from)\s+', '', loc, flags=re.IGNORECASE).strip()
+        return loc
+
+    def _fetch_openweather_data(self, city):
+        """Helper to fetch from OpenWeather API for a specific city string"""
+        if not city or not self.use_real_weather:
+            return None
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={requests.utils.quote(city)}&appid={self.weather_api_key}&units=metric"
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "location": data["name"],
+                    "temperature": data["main"]["temp"],
+                    "description": data["weather"][0]["description"].capitalize(),
+                    "humidity": data["main"]["humidity"],
+                    "wind_speed": data["wind"]["speed"]
+                }
+        except Exception as e:
+            logger.error(f"Error calling Weather API for '{city}': {e}")
+        return None
+
     # WEATHER API
     def get_weather(self, location):
-        """Fetch current weather for a city"""
+        """Fetch current weather for a city with smart sanitization and fallback"""
         if not location:
             return {"error": "Location must be specified."}
-            
+
+        cleaned = self._clean_location(location)
+        raw_target = cleaned if cleaned else location.strip()
+
         if self.use_real_weather:
-            url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={self.weather_api_key}&units=metric"
-            try:
-                response = requests.get(url, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    return {
-                        "location": data["name"],
-                        "temperature": data["main"]["temp"],
-                        "description": data["weather"][0]["description"].capitalize(),
-                        "humidity": data["main"]["humidity"],
-                        "wind_speed": data["wind"]["speed"]
-                    }
-                elif response.status_code == 404:
-                    return {"error": f"City '{location}' not found."}
-                else:
-                    return {"error": f"Weather API error (status code: {response.status_code})"}
-            except Exception as e:
-                logger.error(f"Error calling Weather API: {e}")
-                # Fallthrough to mock
-        
-        # Mock weather fallback
-        logger.info(f"Using Mock Weather for '{location}'")
-        h = sum(ord(c) for c in location)
+            # 1. Try with cleaned target (e.g. "ahmedabad")
+            res = self._fetch_openweather_data(raw_target)
+            if res:
+                return res
+
+            # 2. Try with raw location if different
+            if raw_target != location.strip():
+                res = self._fetch_openweather_data(location.strip())
+                if res:
+                    return res
+
+            # 3. Try last word of raw target if multi-word (e.g. "this city ahmedabad" -> "ahmedabad")
+            words = raw_target.split()
+            if len(words) > 1:
+                res = self._fetch_openweather_data(words[-1])
+                if res:
+                    return res
+
+        # 4. Mock weather fallback if real lookup returns 404 or network fails
+        final_city = (raw_target.split()[-1] if raw_target else location).strip().title()
+        logger.info(f"Using Mock Weather for '{final_city}'")
+        h = sum(ord(c) for c in final_city)
         temp = 14 + (h % 18)
         humidity = 45 + (h % 40)
         wind = 2.0 + (h % 8) / 2.0
         conditions = ["Sunny", "Partly Cloudy", "Overcast", "Light Rain", "Scattered Showers", "Breezy"]
         desc = conditions[h % len(conditions)]
         return {
-            "location": location.strip().title(),
+            "location": final_city,
             "temperature": temp,
             "description": desc,
             "humidity": humidity,
@@ -223,6 +322,9 @@ class ComposiaSDK:
                 mail = self._connect_imap()
                 mail.select("inbox")
                 status, messages = mail.search(None, "ALL")
+                if not messages or not messages[0]:
+                    mail.logout()
+                    return []
                 email_ids = messages[0].split()
                 # Get latest 10
                 latest_ids = email_ids[-10:]
@@ -237,7 +339,7 @@ class ComposiaSDK:
                 return emails
             except Exception as e:
                 logger.error(f"IMAP get_latest_emails failed: {e}")
-                return {"error": f"Failed to retrieve emails: {str(e)}"}
+                return self._format_imap_error(e)
 
         if self.use_real_google:
             try:
@@ -293,6 +395,9 @@ class ComposiaSDK:
                 mail.select("inbox")
                 search_query = f'(SINCE "{imap_start}" BEFORE "{imap_end}")'
                 status, messages = mail.search(None, search_query)
+                if not messages or not messages[0]:
+                    mail.logout()
+                    return []
                 email_ids = messages[0].split()
                 email_ids = email_ids[-20:]
                 email_ids.reverse()
@@ -306,7 +411,7 @@ class ComposiaSDK:
                 return emails
             except Exception as e:
                 logger.error(f"IMAP get_emails_between_dates failed: {e}")
-                return {"error": f"Failed to retrieve emails: {str(e)}"}
+                return self._format_imap_error(e)
 
         if self.use_real_google:
             try:
@@ -354,6 +459,9 @@ class ComposiaSDK:
                 mail = self._connect_imap()
                 mail.select("inbox")
                 status, messages = mail.search(None, f'SUBJECT "{subject_query}"')
+                if not messages or not messages[0]:
+                    mail.logout()
+                    return []
                 email_ids = messages[0].split()
                 email_ids = email_ids[-20:]
                 email_ids.reverse()
@@ -367,7 +475,7 @@ class ComposiaSDK:
                 return emails
             except Exception as e:
                 logger.error(f"IMAP search_emails_by_subject failed: {e}")
-                return {"error": f"Failed to retrieve emails: {str(e)}"}
+                return self._format_imap_error(e)
 
         if self.use_real_google:
             try:
@@ -440,7 +548,7 @@ class ComposiaSDK:
                 return saved_files
             except Exception as e:
                 logger.error(f"IMAP save_attachments failed: {e}")
-                return {"error": f"Failed to download attachments: {str(e)}"}
+                return self._format_imap_error(e)
 
         if self.use_real_google:
             try:

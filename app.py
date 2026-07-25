@@ -30,8 +30,54 @@ composia = ComposiaSDK(
     google_credentials_path=os.getenv("GOOGLE_CLIENT_SECRET_FILE")
 )
 
+from flask_sqlalchemy import SQLAlchemy
+import json
+
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-change-this')
+
+# SQLAlchemy SQLite setup for zero-config resume-ready persistence
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///chat_history.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+sqlite_db = SQLAlchemy(app)
+
+class SQLiteUser(sqlite_db.Model):
+    __tablename__ = 'users'
+    user_id = sqlite_db.Column(sqlite_db.String(64), primary_key=True)
+    created_at = sqlite_db.Column(sqlite_db.String(64))
+
+class SQLiteChatSession(sqlite_db.Model):
+    __tablename__ = 'chat_sessions'
+    id = sqlite_db.Column(sqlite_db.String(64), primary_key=True)
+    title = sqlite_db.Column(sqlite_db.String(255))
+    user_id = sqlite_db.Column(sqlite_db.String(64), sqlite_db.ForeignKey('users.user_id'))
+    created_at = sqlite_db.Column(sqlite_db.String(64))
+    updated_at = sqlite_db.Column(sqlite_db.String(64))
+    messages = sqlite_db.relationship('SQLiteChatMessage', backref='session', cascade='all, delete-orphan', lazy=True)
+
+class SQLiteChatMessage(sqlite_db.Model):
+    __tablename__ = 'chat_messages'
+    id = sqlite_db.Column(sqlite_db.String(64), primary_key=True)
+    chat_id = sqlite_db.Column(sqlite_db.String(64), sqlite_db.ForeignKey('chat_sessions.id'))
+    role = sqlite_db.Column(sqlite_db.String(64)) # 'user' or 'assistant'
+    content = sqlite_db.Column(sqlite_db.Text)
+    model = sqlite_db.Column(sqlite_db.String(128), nullable=True)
+    timestamp = sqlite_db.Column(sqlite_db.String(64))
+
+class SQLiteUserProfile(sqlite_db.Model):
+    __tablename__ = 'user_profiles'
+    user_id = sqlite_db.Column(sqlite_db.String(64), sqlite_db.ForeignKey('users.user_id'), primary_key=True)
+    name = sqlite_db.Column(sqlite_db.String(255), nullable=True)
+    preferences = sqlite_db.Column(sqlite_db.Text, default='{}') # JSON string
+    created_at = sqlite_db.Column(sqlite_db.String(64))
+
+# Create database tables
+with app.app_context():
+    try:
+        sqlite_db.create_all()
+        logger.info("SQLite database tables created or verified successfully")
+    except Exception as db_err:
+        logger.error(f"Failed to initialize SQLite tables: {db_err}")
 
 # Initialize Groq client
 try:
@@ -56,12 +102,257 @@ except Exception as e:
 # Available models (you can expand this list)
 AVAILABLE_MODELS = [
     "llama-3.1-8b-instant",
-    "llama-3.3-70b-versatile"
+    "llama-3.3-70b-versatile",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it"
 ]
 
-# Simple in-memory storage (in production, use a proper database)
-chat_sessions = {}
-user_profiles = {}
+# MongoDB configuration and connection with automatic fallback
+MONGO_URI = os.getenv("MONGO_URI")
+db = None
+chats_col = None
+profiles_col = None
+
+if MONGO_URI:
+    try:
+        from pymongo import MongoClient
+        # Configure MongoClient with a short 2-second timeout to check connection immediately
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+        # Force a connection validation check by pinging the server
+        client.admin.command('ping')
+        
+        db = client.get_database()  # This resolves the database name from the connection string URI if present
+        # In case the URI does not specify a DB name, default to 'chat_interface'
+        if db.name == 'admin' or not db.name:
+            db = client['chat_interface']
+        chats_col = db['chats']
+        profiles_col = db['profiles']
+        logger.info(f"Connected to MongoDB successfully: DB Name = '{db.name}'")
+    except Exception as e:
+        logger.error(f"Failed to connect to MongoDB (MongoDB might not be running), falling back to SQLite: {e}")
+        db = None
+        chats_col = None
+        profiles_col = None
+else:
+    logger.info("No MONGO_URI specified, using SQLite database persistence")
+
+
+# MongoDB helper functions with SQLite fallbacks
+def save_chat(chat_data):
+    """Save or update chat session data"""
+    if not chat_data:
+        return
+    user_id = chat_data.get('user_id')
+    chat_id = chat_data.get('id')
+    if chats_col is not None:
+        try:
+            chats_col.replace_one({'id': chat_id}, chat_data, upsert=True)
+        except Exception as e:
+            logger.error(f"Error saving chat to MongoDB: {e}")
+    else:
+        # Fallback to SQLite
+        try:
+            # Ensure User exists first
+            userObj = SQLiteUser.query.filter_by(user_id=user_id).first()
+            if not userObj:
+                userObj = SQLiteUser(user_id=user_id, created_at=datetime.now().isoformat())
+                sqlite_db.session.add(userObj)
+                sqlite_db.session.commit()
+                
+            sessionObj = SQLiteChatSession.query.filter_by(id=chat_id).first()
+            if not sessionObj:
+                sessionObj = SQLiteChatSession(
+                    id=chat_id,
+                    title=chat_data.get('title'),
+                    user_id=user_id,
+                    created_at=chat_data.get('created_at', datetime.now().isoformat()),
+                    updated_at=chat_data.get('updated_at', datetime.now().isoformat())
+                )
+                sqlite_db.session.add(sessionObj)
+            else:
+                sessionObj.title = chat_data.get('title')
+                sessionObj.updated_at = chat_data.get('updated_at', datetime.now().isoformat())
+            
+            # Now delete old messages and overwrite them
+            SQLiteChatMessage.query.filter_by(chat_id=chat_id).delete()
+            
+            # Insert messages
+            for idx, msg in enumerate(chat_data.get('messages', [])):
+                msgObj = SQLiteChatMessage(
+                    id=f"{chat_id}_{idx}",
+                    chat_id=chat_id,
+                    role=msg.get('role'),
+                    content=msg.get('content'),
+                    model=msg.get('model'),
+                    timestamp=msg.get('timestamp', datetime.now().isoformat())
+                )
+                sqlite_db.session.add(msgObj)
+            sqlite_db.session.commit()
+        except Exception as e:
+            sqlite_db.session.rollback()
+            logger.error(f"Error saving chat to SQLite: {e}")
+
+def get_chat_by_id(user_id, chat_id):
+    """Retrieve a specific chat session"""
+    if chats_col is not None:
+        try:
+            chat_data = chats_col.find_one({'id': chat_id, 'user_id': user_id})
+            if chat_data:
+                chat_data.pop('_id', None)
+                return chat_data
+        except Exception as e:
+            logger.error(f"Error retrieving chat from MongoDB: {e}")
+            return None
+    else:
+        # SQLite retrieval
+        try:
+            sessionObj = SQLiteChatSession.query.filter_by(id=chat_id, user_id=user_id).first()
+            if sessionObj:
+                messages = []
+                for msg in sessionObj.messages:
+                    messages.append({
+                        'role': msg.role,
+                        'content': msg.content,
+                        'model': msg.model,
+                        'timestamp': msg.timestamp
+                    })
+                return {
+                    'id': sessionObj.id,
+                    'title': sessionObj.title,
+                    'user_id': sessionObj.user_id,
+                    'created_at': sessionObj.created_at,
+                    'updated_at': sessionObj.updated_at,
+                    'messages': messages
+                }
+        except Exception as e:
+            logger.error(f"Error retrieving chat from SQLite: {e}")
+        return None
+
+def get_user_chats(user_id):
+    """Retrieve all chats for a user"""
+    if chats_col is not None:
+        try:
+            cursor = chats_col.find({'user_id': user_id})
+            chats = {}
+            for doc in cursor:
+                doc.pop('_id', None)
+                chats[doc['id']] = doc
+            return chats
+        except Exception as e:
+            logger.error(f"Error retrieving user chats from MongoDB: {e}")
+            return {}
+    else:
+        # SQLite retrieval
+        try:
+            sessions = SQLiteChatSession.query.filter_by(user_id=user_id).all()
+            chats = {}
+            for s in sessions:
+                messages = []
+                for msg in s.messages:
+                    messages.append({
+                        'role': msg.role,
+                        'content': msg.content,
+                        'model': msg.model,
+                        'timestamp': msg.timestamp
+                    })
+                chats[s.id] = {
+                    'id': s.id,
+                    'title': s.title,
+                    'user_id': s.user_id,
+                    'created_at': s.created_at,
+                    'updated_at': s.updated_at,
+                    'messages': messages
+                }
+            return chats
+        except Exception as e:
+            logger.error(f"Error retrieving user chats from SQLite: {e}")
+            return {}
+
+def delete_user_chat(user_id, chat_id):
+    """Delete a specific chat session"""
+    if chats_col is not None:
+        try:
+            chats_col.delete_one({'id': chat_id, 'user_id': user_id})
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting chat from MongoDB: {e}")
+            return False
+    else:
+        # SQLite delete
+        try:
+            sessionObj = SQLiteChatSession.query.filter_by(id=chat_id, user_id=user_id).first()
+            if sessionObj:
+                sqlite_db.session.delete(sessionObj)
+                sqlite_db.session.commit()
+                return True
+        except Exception as e:
+            sqlite_db.session.rollback()
+            logger.error(f"Error deleting chat from SQLite: {e}")
+            return False
+
+def save_user_profile(user_id, profile_data):
+    """Save or update user profile data"""
+    if not profile_data:
+        return
+    if profiles_col is not None:
+        try:
+            profiles_col.replace_one({'user_id': user_id}, {
+                'user_id': user_id,
+                'profile': profile_data
+            }, upsert=True)
+        except Exception as e:
+            logger.error(f"Error saving user profile to MongoDB: {e}")
+    else:
+        # SQLite save
+        try:
+            # Ensure User exists first
+            userObj = SQLiteUser.query.filter_by(user_id=user_id).first()
+            if not userObj:
+                userObj = SQLiteUser(user_id=user_id, created_at=datetime.now().isoformat())
+                sqlite_db.session.add(userObj)
+                sqlite_db.session.commit()
+
+            profileObj = SQLiteUserProfile.query.filter_by(user_id=user_id).first()
+            if not profileObj:
+                profileObj = SQLiteUserProfile(
+                    user_id=user_id,
+                    name=profile_data.get('name'),
+                    preferences=json.dumps(profile_data.get('preferences', {})),
+                    created_at=profile_data.get('created_at', datetime.now().isoformat())
+                )
+                sqlite_db.session.add(profileObj)
+            else:
+                profileObj.name = profile_data.get('name')
+                profileObj.preferences = json.dumps(profile_data.get('preferences', {}))
+            sqlite_db.session.commit()
+        except Exception as e:
+            sqlite_db.session.rollback()
+            logger.error(f"Error saving user profile to SQLite: {e}")
+
+def get_user_profile(user_id):
+    """Retrieve user profile data"""
+    if profiles_col is not None:
+        try:
+            doc = profiles_col.find_one({'user_id': user_id})
+            if doc:
+                return doc.get('profile')
+        except Exception as e:
+            logger.error(f"Error retrieving user profile from MongoDB: {e}")
+    else:
+        # SQLite retrieval
+        try:
+            profileObj = SQLiteUserProfile.query.filter_by(user_id=user_id).first()
+            if profileObj:
+                return {
+                    'name': profileObj.name,
+                    'preferences': json.loads(profileObj.preferences or '{}'),
+                    'created_at': profileObj.created_at
+                }
+        except Exception as e:
+            logger.error(f"Error retrieving user profile from SQLite: {e}")
+    return None
+
+
 
 def initialize_session():
     """Initialize session with default values"""
@@ -71,12 +362,16 @@ def initialize_session():
     if 'current_chat_id' not in session:
         session['current_chat_id'] = None
 
-    if 'user_profile' not in session:
-        session['user_profile'] = {
-            'name': None,
-            'preferences': {},
-            'created_at': datetime.now().isoformat()
-        }
+    if 'user_profile' not in session or not session['user_profile'].get('name'):
+        db_profile = get_user_profile(session['user_id'])
+        if db_profile:
+            session['user_profile'] = db_profile
+        else:
+            session['user_profile'] = {
+                'name': None,
+                'preferences': {},
+                'created_at': datetime.now().isoformat()
+            }
 
 def create_new_chat(title=None):
     """Create a new chat session"""
@@ -102,10 +397,7 @@ def create_new_chat(title=None):
         'user_id': user_id
     }
 
-    if user_id not in chat_sessions:
-        chat_sessions[user_id] = {}
-
-    chat_sessions[user_id][chat_id] = chat_data
+    save_chat(chat_data)
     session['current_chat_id'] = chat_id
     session.modified = True
 
@@ -119,14 +411,18 @@ def get_current_chat():
     if not user_id or not chat_id:
         return None
 
-    return chat_sessions.get(user_id, {}).get(chat_id)
+    return get_chat_by_id(user_id, chat_id)
 
 def update_chat_title(chat_id, title):
     """Update chat title"""
     user_id = session.get('user_id')
-    if user_id and chat_id in chat_sessions.get(user_id, {}):
-        chat_sessions[user_id][chat_id]['title'] = title
-        chat_sessions[user_id][chat_id]['updated_at'] = datetime.now().isoformat()
+    if not user_id:
+        return False
+    chat_data = get_chat_by_id(user_id, chat_id)
+    if chat_data:
+        chat_data['title'] = title
+        chat_data['updated_at'] = datetime.now().isoformat()
+        save_chat(chat_data)
         return True
     return False
 
@@ -505,6 +801,7 @@ def chat():
             'timestamp': datetime.now().isoformat()
         }
         current_chat['messages'].append(user_msg)
+        save_chat(current_chat)
 
         # Intercept specific weather and email commands for high reliability
         msg_lower = user_message.lower()
@@ -513,11 +810,11 @@ def chat():
         model_used = selected_model
 
         # 1. Weather command
-        weather_match = re.search(r'weather(?: in)? ([a-zA-Z\s]+)', msg_lower)
+        weather_match = re.search(r'(?:weather|temperature|forecast)(?:\s+(?:in|of|for|at))?\s+([a-zA-Z\s]+)', msg_lower)
         if weather_match:
             city = weather_match.group(1).strip()
             res = composia.get_weather(city)
-            if "error" in res:
+            if isinstance(res, dict) and "error" in res:
                 ai_response = f"Error fetching weather: {res['error']}"
             else:
                 ai_response = f"The current weather in **{res['location']}** is **{res['temperature']}°C** with **{res['description']}**.  \n- Humidity: {res['humidity']}%  \n- Wind Speed: {res['wind_speed']} m/s"
@@ -525,12 +822,14 @@ def chat():
             intercepted = True
 
         # 2. Save attachments command
-        elif "save attachment" in msg_lower or "download attachment" in msg_lower:
+        elif any(kw in msg_lower for kw in ["save attachment", "download attachment", "save file", "download file", "get attachment"]):
             id_match = re.search(r'(msg_\d+)', msg_lower)
             if not id_match:
-                id_match = re.search(r'attachment(?:s)?\s+(?:for|of)?\s*(?:email|message)?\s*([a-zA-Z0-9_\-]+)', msg_lower)
+                id_match = re.search(r'(?:attachment|file|email|msg)\s*(?:for|of|id)?\s*([a-zA-Z0-9_\-]+)', msg_lower)
             if id_match:
                 email_id = id_match.group(1).strip()
+                if not email_id.startswith("msg_") and email_id.isdigit():
+                    email_id = f"msg_{email_id.zfill(3)}"
                 res = composia.save_attachments(email_id)
                 if isinstance(res, dict) and "error" in res:
                     ai_response = f"Error downloading attachments: {res['error']}"
@@ -547,9 +846,9 @@ def chat():
         # 3. Email command
         elif "mail" in msg_lower or "email" in msg_lower:
             if "between" in msg_lower:
-                dates = re.findall(r'(\d{4}/\d{2}/\d{2})', user_message)
+                dates = re.findall(r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})', user_message)
                 if len(dates) >= 2:
-                    start_date, end_date = dates[0], dates[1]
+                    start_date, end_date = dates[0].replace('-', '/'), dates[1].replace('-', '/')
                     res = composia.get_emails_between_dates(start_date, end_date)
                     title = f"Emails between {start_date} and {end_date}"
                 else:
@@ -572,8 +871,8 @@ def chat():
                 ai_response = "No emails found matching that query in your inbox."
             else:
                 lines = [f"### {title}:", ""]
-                for idx, email in enumerate(res, 1):
-                    lines.append(f"{idx}. **From:** {email['from']}  \n   **Subject:** {email['subject']} (Date: *{email['date']}*, ID: `{email['id']}`)")
+                for idx, email_item in enumerate(res, 1):
+                    lines.append(f"{idx}. **From:** {email_item['from']}  \n   **Subject:** {email_item['subject']} (Date: *{email_item['date']}*, ID: `{email_item['id']}`)")
                 lines.append("\n*To save attachments, type: save attachment [ID]*")
                 ai_response = "\n".join(lines)
             model_used = f"{selected_model} + Composia Gmail SDK"
@@ -596,6 +895,7 @@ def chat():
                 current_chat['title'] = new_title
 
             session.modified = True
+            save_chat(current_chat)
             return jsonify({
                 'response': ai_response,
                 'model_used': model_used,
@@ -633,6 +933,7 @@ def chat():
             current_chat['title'] = new_title
 
         session.modified = True
+        save_chat(current_chat)
 
         logger.info("Successfully generated AI response using native Groq tool calling")
         return jsonify({
@@ -711,6 +1012,7 @@ def fallback_to_groq_api(user_message: str, selected_model: str, current_chat: d
         current_chat['updated_at'] = datetime.now().isoformat()
 
         session.modified = True
+        save_chat(current_chat)
 
         return jsonify({
             'response': ai_response,
@@ -753,13 +1055,13 @@ def get_chats():
     try:
         initialize_session()
         user_id = session.get('user_id')
-        user_chats = chat_sessions.get(user_id, {})
+        user_chats = get_user_chats(user_id)
 
         # Create a default chat if none exists
         if not user_chats and not session.get('current_chat_id'):
             logger.info("No chats found, creating default chat")
             create_new_chat("New Chat")
-            user_chats = chat_sessions.get(user_id, {})
+            user_chats = get_user_chats(user_id)
 
         # Convert to list and sort by updated_at
         chats_list = []
@@ -799,7 +1101,7 @@ def get_chat(chat_id):
     try:
         initialize_session()
         user_id = session.get('user_id')
-        chat_data = chat_sessions.get(user_id, {}).get(chat_id)
+        chat_data = get_chat_by_id(user_id, chat_id)
 
         if not chat_data:
             return jsonify({'error': 'Chat not found'}), 404
@@ -815,14 +1117,14 @@ def switch_chat(chat_id):
     try:
         initialize_session()
         user_id = session.get('user_id')
+        chat_data = get_chat_by_id(user_id, chat_id)
 
-        if chat_id not in chat_sessions.get(user_id, {}):
+        if not chat_data:
             return jsonify({'error': 'Chat not found'}), 404
 
         session['current_chat_id'] = chat_id
         session.modified = True
 
-        chat_data = chat_sessions[user_id][chat_id]
         return jsonify({
             'message': 'Chat switched successfully',
             'chat': chat_data
@@ -857,14 +1159,15 @@ def delete_chat(chat_id):
         initialize_session()
         user_id = session.get('user_id')
 
-        if user_id not in chat_sessions or chat_id not in chat_sessions[user_id]:
+        chat_data = get_chat_by_id(user_id, chat_id)
+        if not chat_data:
             return jsonify({'error': 'Chat not found'}), 404
 
-        del chat_sessions[user_id][chat_id]
+        delete_user_chat(user_id, chat_id)
 
         # If this was the current chat, switch to another one or create new
         if session.get('current_chat_id') == chat_id:
-            remaining_chats = list(chat_sessions.get(user_id, {}).keys())
+            remaining_chats = list(get_user_chats(user_id).keys())
             if remaining_chats:
                 session['current_chat_id'] = remaining_chats[0]
             else:
@@ -876,6 +1179,67 @@ def delete_chat(chat_id):
     except Exception as e:
         logger.error(f"Error deleting chat {chat_id}: {e}")
         return jsonify({'error': 'Failed to delete chat'}), 500
+
+@app.route('/chats/<chat_id>/export', methods=['GET'])
+def export_chat(chat_id):
+    """Export a chat session as Markdown or JSON"""
+    try:
+        from flask import Response
+        initialize_session()
+        user_id = session.get('user_id')
+        chat_data = get_chat_by_id(user_id, chat_id)
+        
+        if not chat_data:
+            return jsonify({'error': 'Chat not found'}), 404
+            
+        export_format = request.args.get('format', 'markdown').lower()
+        
+        if export_format == 'json':
+            content = json.dumps(chat_data, indent=2)
+            filename = f"chat_export_{chat_id}.json"
+            mimetype = "application/json"
+        else:
+            # Generate markdown format
+            lines = [
+                f"# Chat Session: {chat_data['title']}",
+                f"- **Exported On:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                "",
+                "---",
+                ""
+            ]
+            for msg in chat_data['messages']:
+                role_name = "User" if msg['role'] == 'user' else "AI Assistant"
+                timestamp = msg.get('timestamp', '')
+                if timestamp:
+                    try:
+                        dt = datetime.fromisoformat(timestamp)
+                        timestamp_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        timestamp_str = timestamp
+                else:
+                    timestamp_str = "N/A"
+                
+                model_info = f" ({msg['model']})" if msg['role'] == 'assistant' and msg.get('model') else ""
+                lines.append(f"### {role_name}{model_info}")
+                lines.append(f"*Sent on: {timestamp_str}*")
+                lines.append("")
+                lines.append(msg['content'])
+                lines.append("")
+                lines.append("---")
+                lines.append("")
+                
+            content = "\n".join(lines)
+            filename = f"chat_export_{chat_id}.md"
+            mimetype = "text/markdown"
+            
+        return Response(
+            content,
+            mimetype=mimetype,
+            headers={"Content-Disposition": f"attachment;filename={filename}"}
+        )
+    except Exception as e:
+        logger.error(f"Error exporting chat {chat_id}: {e}")
+        return jsonify({'error': 'Failed to export chat'}), 500
 
 @app.route('/profile', methods=['GET'])
 def get_profile():
@@ -901,6 +1265,8 @@ def update_profile():
             session['user_profile']['preferences'].update(data['preferences'])
 
         session.modified = True
+        save_user_profile(session.get('user_id'), session['user_profile'])
+
         return jsonify({
             'message': 'Profile updated successfully',
             'profile': session['user_profile']
@@ -920,7 +1286,7 @@ def search_chats():
             return jsonify({'chats': []})
 
         user_id = session.get('user_id')
-        user_chats = chat_sessions.get(user_id, {})
+        user_chats = get_user_chats(user_id)
 
         matching_chats = []
         for chat_id, chat_data in user_chats.items():
@@ -939,6 +1305,65 @@ def search_chats():
     except Exception as e:
         logger.error(f"Error searching chats: {e}")
         return jsonify({'error': 'Failed to search chats'}), 500
+
+@app.route('/gmail/status', methods=['GET'])
+def get_gmail_status():
+    """Endpoint to check current Gmail integration status"""
+    status = composia.test_gmail_connection()
+    return jsonify(status)
+
+@app.route('/gmail/config', methods=['POST'])
+def update_gmail_config():
+    """Endpoint to update Gmail credentials in .env and test connection"""
+    try:
+        data = request.get_json() or {}
+        user = data.get('gmail_user', '').strip()
+        app_password = data.get('gmail_app_password', '').strip()
+        
+        if not user or not app_password:
+            return jsonify({'success': False, 'error': 'Both Gmail address and App Password are required.'}), 400
+            
+        env_file = os.path.join(os.path.dirname(__file__), '.env')
+        
+        # Read existing .env lines
+        if os.path.exists(env_file):
+            with open(env_file, 'r') as f:
+                lines = f.readlines()
+        else:
+            lines = []
+            
+        new_lines = []
+        user_set = False
+        pass_set = False
+        
+        for line in lines:
+            if line.startswith('GMAIL_USER='):
+                new_lines.append(f'GMAIL_USER={user}\n')
+                user_set = True
+            elif line.startswith('GMAIL_APP_PASSWORD='):
+                new_lines.append(f'GMAIL_APP_PASSWORD={app_password}\n')
+                pass_set = True
+            else:
+                new_lines.append(line)
+                
+        if not user_set:
+            new_lines.append(f'GMAIL_USER={user}\n')
+        if not pass_set:
+            new_lines.append(f'GMAIL_APP_PASSWORD={app_password}\n')
+            
+        with open(env_file, 'w') as f:
+            f.writelines(new_lines)
+            
+        # Force reload dotenv
+        from dotenv import load_dotenv
+        load_dotenv(env_file, override=True)
+        
+        # Test connection
+        test_res = composia.test_gmail_connection()
+        return jsonify(test_res)
+    except Exception as e:
+        logger.error(f"Error updating Gmail config: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -959,4 +1384,4 @@ if __name__ == '__main__':
     logger.info("Starting Flask application...")
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
     logger.info(f"Debug mode: {debug_mode}")
-    app.run(debug=debug_mode, host='0.0.0.0', port=5000)
+    app.run(debug=debug_mode, host='0.0.0.0', port=5000, use_reloader=False)
